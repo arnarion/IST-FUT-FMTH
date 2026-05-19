@@ -30,6 +30,12 @@ info:
     
     Space
 
+    ## Caveat on batch operations
+
+    The batch endpoints (`/v1/batches`) are included in this specification as a design target.
+    The underlying implementation is not yet available and the batch contract will be subject
+    to review in Q3 2026.
+
   license:
     name: Creative Commons Attribution 4.0 International Public License
     url: https://creativecommons.org/licenses/by/4.0/
@@ -166,6 +172,10 @@ paths:
       summary: Search documents
       description: |
         Returns a filtered list of documents. Use `GET /v1/documents/{document-id}` for retrieval of a single document by identifier.
+
+        **Implementation note:** The underlying SOAP operation (`GetDocuments`) does not currently
+        support filtering by `senderId` alone — `ownerId` is always required. Filtering solely
+        by sender is under analysis and may be exposed through a new endpoint in a future revision.
       operationId: searchDocuments
       tags:
         - Documents
@@ -176,6 +186,7 @@ paths:
         - $ref: "#/components/parameters/Storage-System"
         - $ref: "#/components/parameters/senderIdOptionalQuery"
         - $ref: "#/components/parameters/ownerIdQuery"
+        - $ref: "#/components/parameters/externalIdQuery"
         - $ref: "#/components/parameters/documentTypeCode"
         - $ref: "#/components/parameters/batchStatusQuery"
         - $ref: "#/components/parameters/dateFrom"
@@ -717,7 +728,7 @@ components:
         Batch id in path.
       required: true
       schema:
-        $ref: "#/components/schemas/uuid"
+        type: string
         
     batchIdQuery:
       name: batchId
@@ -726,7 +737,7 @@ components:
         Batch id.
       required: false
       schema:
-        $ref: "#/components/schemas/uuid"
+        type: string
 
     documentIdQuery:
       name: documentId
@@ -770,7 +781,7 @@ components:
       name: dateTo
       in: query
       description: |
-        End date (inclusive) of the expected list, default is "now" if not given.
+        End date (inclusive) of the expected list.
       required: false
       example: "2024-11-30"
       schema:
@@ -832,6 +843,15 @@ components:
         type: string
         minLength: 1
         maxLength: 10
+
+    externalIdQuery:
+      name: externalId
+      in: query
+      description: |
+        External identifier used to link the document with the sender's own systems.
+      required: false
+      schema:
+        type: string
 
     batchStatusQuery:
       name: status
@@ -1013,30 +1033,22 @@ components:
 
     documentTypeDetails:
       description: |
-        Document type details.
+        Document type details as returned by the service.
       type: object
       required:
         - code
-        - name
-        - durableMedia
+        - description
+        - fileName
+        - email
       properties:
         code:
           description: Unique code for the document type.
           type: string
           minLength: 1
           maxLength: 10
-        name:
-          description: Short description for the document type
-          type: string
-          maxLength: 70
-        durableMedia:
-          description: |
-            Control flag describing if document type is durable media. If document type
-            is durable media then any batch using this code can not be updated.
-          type: boolean
         description:
           description: |
-            Long description for the document
+            Description of the document type.
           type: string
           maxLength: 140
         fileType:
@@ -1046,23 +1058,54 @@ components:
           enum:
             - "XML"
             - "PDF"
-        categoryCode:
+        fileName:
           description: |
-            Document category code.
-          allOf:
-            - $ref: "#/components/schemas/documentCategory"
-        categoryDescription:
-          description: |
-            Human-readable description of the document category.
+            File name for FTP delivery of data for this document type.
           type: string
           maxLength: 140
+        email:
+          description: |
+            Email address of the submitting party for this document type.
+          type: string
+          format: email
+        category:
+          description: |
+            Category information for this document type.
+          type: object
+          required:
+            - code
+            - description
+          properties:
+            code:
+              $ref: "#/components/schemas/documentCategory"
+            description:
+              description: Category description.
+              type: string
+              maxLength: 140
+            subCode:
+              description: Sub-category code. Generally not in use.
+              type: string
+            name:
+              description: Category name.
+              type: string
+              maxLength: 140
 
     documentTypeList:
       description: |
-        List of document type with details.
-      type: array
-      items:
-        $ref: "#/components/schemas/documentTypeDetails"
+        Document types for a sender.
+      type: object
+      required:
+        - senderName
+        - documentTypes
+      properties:
+        senderName:
+          description: Name of the sender.
+          type: string
+          maxLength: 140
+        documentTypes:
+          type: array
+          items:
+            $ref: "#/components/schemas/documentTypeDetails"
 
     documentTypeCreation:
       description: |
@@ -1087,13 +1130,26 @@ components:
           type: string
           format: email
 
-    documentTypeCreationList:
+    documentTypeCreationRequest:
       description: |
-        List of document types to create.
-      type: array
-      minItems: 1
-      items:
-        $ref: "#/components/schemas/documentTypeCreation"
+        Request body for creating document types for a sender.
+      type: object
+      required:
+        - documentTypes
+      properties:
+        submittingId:
+          description: |
+            Identifier (kennitala) of the submitting party authorised to send documents on behalf of the sender.
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/kennitala"
+        documentTypes:
+          description: |
+            List of document types to create.
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/documentTypeCreation"
 
     documentTypeCreationFailure:
       description: |
@@ -1197,8 +1253,6 @@ components:
             Free text reference set by the sender.
           type: string
           maxLength: 200
-        description:
-          $ref: "#/components/schemas/fileDescription"
 
     fileTypeXML:
       type: string
@@ -1220,6 +1274,10 @@ components:
           $ref: "#/components/schemas/fileTypeXML"
         file:
           description: XML document payload as a plain string.
+          type: string
+        styleSheetName:
+          description: |
+            Name of the XSLT style sheet to apply when rendering the XML document.
           type: string
 
     filePayloadPDF:
@@ -1351,6 +1409,8 @@ components:
               description: |
                 Indicates whether the document is cross-referenced to another object.
               type: boolean
+            description:
+              $ref: "#/components/schemas/fileDescription"
             fileType:
               description: |
                 The file type of the document.
@@ -1750,12 +1810,12 @@ components:
         - "SERVICE_UNAVAILABLE"
 
     #####################################################
-    # RFC7807 Error Schemas
+    # Error Schemas
     #####################################################
 
     Error400:
       description: |
-        Error information according to [RFC7807] for HTTP error code 400.
+        Error information for HTTP error code 400.
         Uses oneOf to distinguish between format errors and validation errors.
       oneOf:
         - $ref: "#/components/schemas/FormatError"
@@ -1870,7 +1930,7 @@ components:
 
     Error401:
       description: |
-        Standardised definition of reporting error information according to [RFC7807]
+        Standardised definition of reporting error information
         in case of a HTTP error code 401.
       type: object
       required:
@@ -1902,7 +1962,7 @@ components:
 
     Error403:
       description: |
-        Standardised definition of reporting error information according to [RFC7807]
+        Standardised definition of reporting error information
         in case of a HTTP error code 403.
       type: object
       required:
@@ -1934,7 +1994,7 @@ components:
 
     Error404:
       description: |
-        Standardised definition of reporting error information according to [RFC7807]
+        Standardised definition of reporting error information
         in case of a HTTP error code 404.
       type: object
       required:
@@ -1966,7 +2026,7 @@ components:
 
     Error429:
       description: |
-        Standardised definition of reporting error information according to [RFC7807]
+        Standardised definition of reporting error information
         in case of a HTTP error code 429.
       type: object
       required:
@@ -1998,7 +2058,7 @@ components:
 
     Error500:
       description: |
-        Standardised definition of reporting error information according to [RFC7807]
+        Standardised definition of reporting error information
         in case of a HTTP error code 500.
       type: object
       required:
@@ -2030,7 +2090,7 @@ components:
 
     Error503:
       description: |
-        Standardised definition of reporting error information according to [RFC7807]
+        Standardised definition of reporting error information
         in case of a HTTP error code 503.
       type: object
       required:
@@ -2135,7 +2195,7 @@ components:
       content:
         application/json:
           schema:
-            $ref: "#/components/schemas/documentTypeCreationList"
+            $ref: "#/components/schemas/documentTypeCreationRequest"
           examples:
             example:
               $ref: "#/components/examples/createDocumentTypes_json_Example"
@@ -2631,28 +2691,34 @@ components:
     #####################################################
     
     documentTypeListResponse-200_json_Example:
-      description: List of document types.
+      description: List of document types for a sender.
       value:
-        [
-          { 
-            "code": "HMTDL",
-            "name": "Launaseðlar",
-            "durableMedia": true,
-            "description": "Launaseðlar - Hólmfríður ÞÍ Traustadóttir",
-            "fileType": "XML",
-            "categoryCode": "Payslip",
-            "categoryDescription": "Payslips"
-          },
-          { 
-            "code": "HMTDR",
-            "name": "Reikningar",
-            "durableMedia": true,
-            "description": "Reikningar - Hólmfríður ÞÍ Traustadóttir",
-            "fileType": "PDF",
-            "categoryCode": "Bill",
-            "categoryDescription": "Bills"
-          }
-        ]
+        {
+          "senderName": "Hólmfríður ÞÍ Traustadóttir",
+          "documentTypes": [
+            { 
+              "code": "HMTDL",
+              "description": "Launaseðlar - Hólmfríður ÞÍ Traustadóttir",
+              "fileType": "XML",
+              "fileName": "HMTDL_launasedlar.xml",
+              "category": {
+                "code": "Payslip",
+                "description": "Launaseðlar"
+              }
+            },
+            { 
+              "code": "HMTDR",
+              "description": "Reikningar - Hólmfríður ÞÍ Traustadóttir",
+              "fileType": "PDF",
+              "fileName": "HMTDR_reikningar.pdf",
+              "email": "billing@example.com",
+              "category": {
+                "code": "Bill",
+                "description": "Reikningar"
+              }
+            }
+          ]
+        }
 
     documentCreated-201_json_Example:
       description: Document created response.
@@ -2668,12 +2734,13 @@ components:
           "created": [
             {
               "code": "HMTDT",
-              "name": "Tilkynningar",
-              "durableMedia": false,
               "description": "Tilkynningar - Hólmfríður ÞÍ Traustadóttir",
               "fileType": "XML",
-              "categoryCode": "Notification",
-              "categoryDescription": "Tilkynningar"
+              "fileName": "HMTDT_tilkynningar.xml",
+              "category": {
+                "code": "Notification",
+                "description": "Tilkynningar"
+              }
             }
           ],
           "failed": [
@@ -2688,17 +2755,20 @@ components:
     createDocumentTypes_json_Example:
       description: Document types creation request.
       value:
-        [
-          {
-            "fileType": "PDF",
-            "categoryCode": "Bill"
-          },
-          {
-            "fileType": "XML",
-            "categoryCode": "Notification",
-            "email": "notifications@example.com"
-          }
-        ]
+        {
+          "submittingId": "1909791489",
+          "documentTypes": [
+            {
+              "fileType": "PDF",
+              "categoryCode": "Bill"
+            },
+            {
+              "fileType": "XML",
+              "categoryCode": "Notification",
+              "email": "notifications@example.com"
+            }
+          ]
+        }
 
     documentInitiation_pdf_Example:
       description: Single PDF document creation request.
